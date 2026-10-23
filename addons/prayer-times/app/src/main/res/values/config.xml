@@ -1,11 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- The city shown. Coordinates in decimal degrees. -->
-    <string name="latitude" translatable="false">LATITUDE</string>
-    <string name="longitude" translatable="false">LONGITUDE</string>
-    <string name="place" translatable="false">CITY_NAME</string>
-    <!-- Aladhan's calculation method (https://aladhan.com/calculation-methods), e.g. 2 ISNA, 3 Muslim World
-         League, 4 Umm al-Qura, 5 Egyptian, 13 Turkey, 21 Morocco. -->
+    <string name="latitude" translatable="false">24.7136</string>
+    <string name="longitude" translatable="false">46.6753</string>
+    <string name="place" translatable="false">Riyadh</string>
     <string name="method" translatable="false">4</string>
     <color name="accent">#2BB673</color>
 </resources>
