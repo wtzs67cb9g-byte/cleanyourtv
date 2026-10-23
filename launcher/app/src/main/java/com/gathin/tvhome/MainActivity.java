@@ -443,10 +443,14 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         raceHeadline = findViewById(R.id.raceHeadline);
         raceSessions = findViewById(R.id.raceSessions);
         showStats = cfg.showStats;
-        shamsi = cfg.shamsiDate;
+        shamsi = true; // Hijri date and prayer times under the clock (IslamicLine)
         greetingName = cfg.greetingName;
         if (shamsi) {
             shamsiDate.setVisibility(View.VISIBLE);
+            shamsiDate.setSingleLine(false);
+            shamsiDate.setMaxLines(2);
+            shamsiDate.setTextSize(15f);
+            shamsiDate.setLineSpacing(6 * density, 1f);
             TextView date = findViewById(R.id.date);
             date.setTextSize(11f);
             date.setPadding(0, (int) (4 * density), 0, 0);
@@ -2284,7 +2288,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
                     : getString(R.string.greeting_with_name, getString(res), greetingName));
             greeting.setTextColor(greetingColor);
         }
-        if (shamsi) shamsiDate.setText(Shamsi.today(getResources()));
+        if (shamsi) shamsiDate.setText(IslamicLine.today());
     }
 
     // ---- race-weekend panel (a theme's race_calendar) -----------------------------------------------
