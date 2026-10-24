@@ -1,0 +1,847 @@
+name: Build Saudi Screensaver
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platforms;android-34 build-tools;34.0.0
+      - name: Write the screensaver source
+        run: |
+          mkdir -p "addons/saudi-dream/app"
+          cat > "addons/saudi-dream/app/build.gradle" <<'SAUDI_EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.gathin.saudidream'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId 'com.gathin.saudidream'
+                  minSdk 26
+                  targetSdk 34
+                  versionCode 1
+                  versionName '1.0'
+              }
+
+              buildTypes {
+                  release {
+                      minifyEnabled true
+                      proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+                      signingConfig signingConfigs.debug
+                  }
+              }
+
+              lint {
+                  abortOnError false
+                  checkReleaseBuilds false
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          SAUDI_EOF
+          mkdir -p "addons/saudi-dream/app"
+          cat > "addons/saudi-dream/app/proguard-rules.pro" <<'SAUDI_EOF'
+          # Shrink and optimise, but keep class and method names: the size win comes from dropping unused
+          # AndroidX code, not from renaming, and readable stack traces matter more in a sideloaded app
+          # where crash reports arrive as screenshots.
+          -dontobfuscate
+          SAUDI_EOF
+          mkdir -p "addons/saudi-dream/app/src/main"
+          cat > "addons/saudi-dream/app/src/main/AndroidManifest.xml" <<'SAUDI_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-feature android:name="android.software.leanback" android:required="false" />
+              <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+
+              <application
+                  android:label="شاشة التوقف"
+                  android:allowBackup="false"
+                  android:supportsRtl="true"
+                  android:usesCleartextTraffic="true">
+
+                  <service
+                      android:name=".SaudiDream"
+                      android:label="شاشة التوقف"
+                      android:exported="true"
+                      android:permission="android.permission.BIND_DREAM_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.service.dreams.DreamService" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                      </intent-filter>
+                      <meta-data android:name="android.service.dream" android:resource="@xml/dream" />
+                  </service>
+
+                  <!-- To preview over adb: am start -n com.gathin.saudidream/.PreviewActivity -->
+                  <activity
+                      android:name=".PreviewActivity"
+                      android:exported="true"
+                      android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen" />
+              </application>
+          </manifest>
+          SAUDI_EOF
+          mkdir -p "addons/saudi-dream/app/src/main/java/com/gathin/saudidream"
+          cat > "addons/saudi-dream/app/src/main/java/com/gathin/saudidream/PrayerMath.java" <<'SAUDI_EOF'
+          package com.gathin.saudidream;
+
+          /** Prayer times by the PrayTimes.org method with Umm al-Qura parameters (Fajr 18.5 degrees, Isha 90 min after Maghrib, 120 in Ramadan). */
+          final class PrayerMath {
+              private static final double FAJR_ANGLE = 18.5;
+
+              private PrayerMath() {
+              }
+
+              /** Fajr, Dhuhr, Asr, Maghrib, Isha in local hours. The PrayTimes.org method, one refinement pass. */
+              static double[] times(int y, int m, int d, double lat, double lng, double tz, boolean ramadan) {
+                  double jDate = julian(y, m, d) - lng / (15 * 24.0);
+                  double fajr = sunAngleTime(jDate, lat, FAJR_ANGLE, 5 / 24.0, true);
+                  double dhuhr = midDay(jDate, 12 / 24.0);
+                  double asr = asrTime(jDate, lat, 1, 13 / 24.0);
+                  double maghrib = sunAngleTime(jDate, lat, 0.833, 18 / 24.0, false);
+                  double adjust = tz - lng / 15.0;
+                  fajr += adjust;
+                  dhuhr += adjust;
+                  asr += adjust;
+                  maghrib += adjust;
+                  double isha = maghrib + (ramadan ? 2.0 : 1.5);
+                  return new double[]{fajr, dhuhr, asr, maghrib, isha};
+              }
+
+              private static double julian(int year, int month, int day) {
+                  if (month <= 2) {
+                      year -= 1;
+                      month += 12;
+                  }
+                  double a = Math.floor(year / 100.0);
+                  double b = 2 - a + Math.floor(a / 4);
+                  return Math.floor(365.25 * (year + 4716)) + Math.floor(30.6001 * (month + 1)) + day + b - 1524.5;
+              }
+
+              /** {declination in degrees, equation of time in hours} */
+              private static double[] sun(double jd) {
+                  double dd = jd - 2451545.0;
+                  double g = fixAngle(357.529 + 0.98560028 * dd);
+                  double q = fixAngle(280.459 + 0.98564736 * dd);
+                  double l = fixAngle(q + 1.915 * dsin(g) + 0.020 * dsin(2 * g));
+                  double e = 23.439 - 0.00000036 * dd;
+                  double ra = Math.toDegrees(Math.atan2(dcos(e) * dsin(l), dcos(l))) / 15.0;
+                  double eqt = q / 15.0 - fixHour(ra);
+                  double decl = Math.toDegrees(Math.asin(dsin(e) * dsin(l)));
+                  return new double[]{decl, eqt};
+              }
+
+              private static double midDay(double jDate, double t) {
+                  return fixHour(12 - sun(jDate + t)[1]);
+              }
+
+              private static double sunAngleTime(double jDate, double lat, double angle, double t, boolean beforeNoon) {
+                  double decl = sun(jDate + t)[0];
+                  double noon = midDay(jDate, t);
+                  double x = (-dsin(angle) - dsin(decl) * dsin(lat)) / (dcos(decl) * dcos(lat));
+                  x = Math.max(-1, Math.min(1, x));
+                  double span = Math.toDegrees(Math.acos(x)) / 15.0;
+                  return noon + (beforeNoon ? -span : span);
+              }
+
+              private static double asrTime(double jDate, double lat, double factor, double t) {
+                  double decl = sun(jDate + t)[0];
+                  double angle = -Math.toDegrees(Math.atan(1 / (factor + Math.tan(Math.toRadians(Math.abs(lat - decl))))));
+                  return sunAngleTime(jDate, lat, angle, t, false);
+              }
+
+              private static double dsin(double d) {
+                  return Math.sin(Math.toRadians(d));
+              }
+
+              private static double dcos(double d) {
+                  return Math.cos(Math.toRadians(d));
+              }
+
+              private static double fixAngle(double a) {
+                  a = a - 360.0 * Math.floor(a / 360.0);
+                  return a < 0 ? a + 360 : a;
+              }
+
+              private static double fixHour(double a) {
+                  a = a - 24.0 * Math.floor(a / 24.0);
+                  return a < 0 ? a + 24 : a;
+              }
+          }
+          SAUDI_EOF
+          mkdir -p "addons/saudi-dream/app/src/main/java/com/gathin/saudidream"
+          cat > "addons/saudi-dream/app/src/main/java/com/gathin/saudidream/PreviewActivity.java" <<'SAUDI_EOF'
+          package com.gathin.saudidream;
+
+          import android.app.Activity;
+          import android.os.Bundle;
+
+          /** Shows the screensaver at once, for trying it out over adb. Back closes it. */
+          public class PreviewActivity extends Activity {
+              private Screen screen;
+
+              @Override
+              protected void onCreate(Bundle saved) {
+                  super.onCreate(saved);
+                  screen = new Screen(this);
+                  setContentView(screen.root);
+              }
+
+              @Override
+              protected void onResume() {
+                  super.onResume();
+                  screen.start();
+              }
+
+              @Override
+              protected void onPause() {
+                  screen.stop();
+                  super.onPause();
+              }
+          }
+          SAUDI_EOF
+          mkdir -p "addons/saudi-dream/app/src/main/java/com/gathin/saudidream"
+          cat > "addons/saudi-dream/app/src/main/java/com/gathin/saudidream/SaudiDream.java" <<'SAUDI_EOF'
+          package com.gathin.saudidream;
+
+          import android.service.dreams.DreamService;
+
+          /** The screensaver: the TV starts it after the idle timeout set in its settings. */
+          public class SaudiDream extends DreamService {
+              private Screen screen;
+
+              @Override
+              public void onAttachedToWindow() {
+                  super.onAttachedToWindow();
+                  setInteractive(false);
+                  setFullscreen(true);
+                  screen = new Screen(this);
+                  setContentView(screen.root);
+              }
+
+              @Override
+              public void onDreamingStarted() {
+                  super.onDreamingStarted();
+                  if (screen != null) screen.start();
+              }
+
+              @Override
+              public void onDreamingStopped() {
+                  if (screen != null) screen.stop();
+                  super.onDreamingStopped();
+              }
+          }
+          SAUDI_EOF
+          mkdir -p "addons/saudi-dream/app/src/main/java/com/gathin/saudidream"
+          cat > "addons/saudi-dream/app/src/main/java/com/gathin/saudidream/Screen.java" <<'SAUDI_EOF'
+          package com.gathin.saudidream;
+
+          import android.content.Context;
+          import android.content.SharedPreferences;
+          import android.graphics.Bitmap;
+          import android.graphics.BitmapFactory;
+          import android.graphics.Color;
+          import android.graphics.Typeface;
+          import android.graphics.drawable.GradientDrawable;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.util.Xml;
+          import android.util.TypedValue;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.widget.FrameLayout;
+          import android.widget.ImageView;
+          import android.widget.LinearLayout;
+          import android.widget.TextView;
+
+          import org.json.JSONObject;
+          import org.xmlpull.v1.XmlPullParser;
+
+          import java.io.ByteArrayInputStream;
+          import java.io.ByteArrayOutputStream;
+          import java.io.File;
+          import java.io.FileOutputStream;
+          import java.io.InputStream;
+          import java.net.HttpURLConnection;
+          import java.net.URL;
+          import java.text.SimpleDateFormat;
+          import java.util.ArrayList;
+          import java.util.Calendar;
+          import java.util.Date;
+          import java.util.List;
+          import java.util.Locale;
+          import java.util.TimeZone;
+
+          /** The whole screensaver: built in code, shared by the DreamService and the preview activity. */
+          final class Screen {
+
+              // ---- Your city. Change these and rebuild. ----
+              private static final double LATITUDE = 24.7136;
+              private static final double LONGITUDE = 46.6753;
+              private static final String CITY = "الرياض";
+
+              private static final int GOLD = 0xFFF2C66D;
+              private static final int SOFT = 0xFFE6E6E6;
+              private static final int DIM = 0xFFD6D6D6;
+
+              private static final String BING = "https://www.bing.com/HPImageArchive.aspx?format=js&idx=0&n=1&mkt=en-US";
+              private static final String[] SPA = {"https://www.spa.gov.sa/rss.xml", "http://www.spa.gov.sa/rss.xml"};
+
+              private static final String[] DAYS = {"الأحد", "الاثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت"};
+              private static final String[] G_MONTHS = {"يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو", "يوليو",
+                      "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"};
+              private static final String[] H_MONTHS = {"محرم", "صفر", "ربيع الأول", "ربيع الآخر", "جمادى الأولى",
+                      "جمادى الآخرة", "رجب", "شعبان", "رمضان", "شوال", "ذو القعدة", "ذو الحجة"};
+              private static final String[] PRAYERS = {"الفجر", "الظهر", "العصر", "المغرب", "العشاء"};
+
+              final FrameLayout root;
+              private final Context ctx;
+              private final Handler ui = new Handler(Looper.getMainLooper());
+              private final float s;
+              private final SharedPreferences prefs;
+
+              private final ImageView bg;
+              private final TextView dayName, dateLine, weatherTemp, weatherDesc, clock, ampm, caption;
+              private final TextView[] prayerViews = new TextView[5];
+              private final TextView nextName, nextTime, nextLeft, ramadanBig, ramadanSmall, newsTitle, newsTime;
+              private final LinearLayout newsBox;
+
+              private final List<String[]> news = new ArrayList<>();
+              private int newsIndex;
+              private boolean running;
+              private long lastWeather, lastNews, lastBing;
+
+              Screen(Context c) {
+                  ctx = c;
+                  prefs = c.getSharedPreferences("screen", Context.MODE_PRIVATE);
+                  s = c.getResources().getDisplayMetrics().widthPixels / 1920f;
+
+                  root = new FrameLayout(c);
+                  root.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+                  root.setBackgroundColor(0xFF0B1A14);
+
+                  bg = new ImageView(c);
+                  bg.setScaleType(ImageView.ScaleType.CENTER_CROP);
+                  root.addView(bg, match());
+
+                  View shade = new View(c);
+                  shade.setBackground(new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+                          new int[]{0xB3000000, 0x26000000, 0x1A000000, 0xB3000000}));
+                  root.addView(shade, match());
+
+                  LinearLayout content = new LinearLayout(c);
+                  content.setOrientation(LinearLayout.VERTICAL);
+                  content.setPadding(px(120), px(80), px(120), px(56));
+                  root.addView(content, match());
+
+                  // Top row: date on the right, weather on the left.
+                  LinearLayout top = new LinearLayout(c);
+                  top.setOrientation(LinearLayout.HORIZONTAL);
+                  LinearLayout dateBox = column();
+                  dayName = text(64, Color.WHITE, true);
+                  dateLine = text(30, SOFT, false);
+                  dateBox.addView(dayName);
+                  dateBox.addView(dateLine);
+                  top.addView(dateBox, new LinearLayout.LayoutParams(0, -2, 1));
+                  LinearLayout weatherBox = column();
+                  weatherBox.setGravity(Gravity.LEFT);
+                  TextView city = text(26, SOFT, false);
+                  city.setText(CITY);
+                  weatherTemp = text(56, Color.WHITE, false);
+                  weatherTemp.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
+                  weatherDesc = text(24, DIM, false);
+                  weatherBox.addView(city);
+                  weatherBox.addView(weatherTemp);
+                  weatherBox.addView(weatherDesc);
+                  top.addView(weatherBox, new LinearLayout.LayoutParams(-2, -2));
+                  content.addView(top, new LinearLayout.LayoutParams(-1, -2));
+
+                  // Middle: the clock and the five prayers.
+                  LinearLayout middle = column();
+                  middle.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
+                  LinearLayout clockRow = new LinearLayout(c);
+                  clockRow.setOrientation(LinearLayout.HORIZONTAL);
+                  clockRow.setGravity(Gravity.BOTTOM);
+                  clock = text(260, Color.WHITE, false);
+                  clock.setTypeface(Typeface.create("sans-serif-thin", Typeface.NORMAL));
+                  clock.setIncludeFontPadding(false);
+                  ampm = text(48, Color.WHITE, false);
+                  ampm.setPadding(px(18), 0, px(18), px(30));
+                  clockRow.addView(clock);
+                  clockRow.addView(ampm);
+                  middle.addView(clockRow);
+                  LinearLayout prayerRow = new LinearLayout(c);
+                  prayerRow.setOrientation(LinearLayout.HORIZONTAL);
+                  for (int i = 0; i < 5; i++) {
+                      prayerViews[i] = text(28, SOFT, false);
+                      prayerViews[i].setPadding(i == 0 ? 0 : px(22), 0, px(22), 0);
+                      prayerRow.addView(prayerViews[i]);
+                  }
+                  middle.addView(prayerRow);
+                  content.addView(middle, new LinearLayout.LayoutParams(-1, 0, 1));
+
+                  // Bottom: a thin line, then three columns.
+                  View line = new View(c);
+                  line.setBackgroundColor(0x59FFFFFF);
+                  content.addView(line, new LinearLayout.LayoutParams(-1, Math.max(1, px(1))));
+                  LinearLayout bottom = new LinearLayout(c);
+                  bottom.setOrientation(LinearLayout.HORIZONTAL);
+                  bottom.setPadding(0, px(32), 0, 0);
+
+                  LinearLayout nextBox = column();
+                  nextBox.addView(label("الصلاة القادمة"));
+                  LinearLayout nextRow = new LinearLayout(c);
+                  nextRow.setOrientation(LinearLayout.HORIZONTAL);
+                  nextRow.setGravity(Gravity.BOTTOM);
+                  nextName = text(54, GOLD, true);
+                  nextTime = text(34, Color.WHITE, false);
+                  nextTime.setPadding(px(16), 0, px(16), px(6));
+                  nextRow.addView(nextName);
+                  nextRow.addView(nextTime);
+                  nextBox.addView(nextRow);
+                  nextLeft = text(26, SOFT, false);
+                  nextBox.addView(nextLeft);
+                  bottom.addView(nextBox, new LinearLayout.LayoutParams(0, -2, 1));
+                  bottom.addView(divider(), new LinearLayout.LayoutParams(Math.max(1, px(1)), -1));
+
+                  LinearLayout ramadanBox = column();
+                  ramadanBox.setPadding(px(48), 0, px(48), 0);
+                  ramadanBox.addView(label("رمضان"));
+                  ramadanBig = text(54, Color.WHITE, true);
+                  ramadanSmall = text(26, SOFT, false);
+                  ramadanBox.addView(ramadanBig);
+                  ramadanBox.addView(ramadanSmall);
+                  bottom.addView(ramadanBox, new LinearLayout.LayoutParams(0, -2, 1));
+                  bottom.addView(divider(), new LinearLayout.LayoutParams(Math.max(1, px(1)), -1));
+
+                  newsBox = column();
+                  newsBox.setPadding(px(48), 0, 0, 0);
+                  newsBox.addView(label("واس  ·  آخر الأخبار"));
+                  newsTitle = text(32, Color.WHITE, false);
+                  newsTitle.setMaxLines(2);
+                  newsTitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                  newsTitle.setLineSpacing(px(6), 1f);
+                  newsTime = text(22, DIM, false);
+                  newsBox.addView(newsTitle);
+                  newsBox.addView(newsTime);
+                  newsBox.setVisibility(View.INVISIBLE);
+                  bottom.addView(newsBox, new LinearLayout.LayoutParams(0, -2, 1.3f));
+                  content.addView(bottom, new LinearLayout.LayoutParams(-1, -2));
+
+                  caption = text(18, 0xFFBDBDBD, false);
+                  caption.setPadding(0, px(18), 0, 0);
+                  caption.setSingleLine(true);
+                  caption.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                  content.addView(caption, new LinearLayout.LayoutParams(-1, -2));
+
+                  loadCachedBackground();
+              }
+
+              // ---------------------------------------------------------------- lifecycle
+
+              void start() {
+                  running = true;
+                  ui.post(tick);
+                  ui.post(rotate);
+              }
+
+              void stop() {
+                  running = false;
+                  ui.removeCallbacksAndMessages(null);
+              }
+
+              private final Runnable tick = new Runnable() {
+                  @Override public void run() {
+                      if (!running) return;
+                      updateTime();
+                      long now = System.currentTimeMillis();
+                      if (now - lastWeather > 30 * 60_000L) { lastWeather = now; fetchWeather(); }
+                      if (now - lastNews > 15 * 60_000L) { lastNews = now; fetchNews(); }
+                      if (now - lastBing > 60 * 60_000L) { lastBing = now; fetchBing(); }
+                      ui.postDelayed(this, 1000 - (now % 1000));
+                  }
+              };
+
+              private final Runnable rotate = new Runnable() {
+                  @Override public void run() {
+                      if (!running) return;
+                      if (!news.isEmpty()) {
+                          newsIndex = (newsIndex + 1) % news.size();
+                          showNews();
+                      }
+                      ui.postDelayed(this, 15_000);
+                  }
+              };
+
+              // ---------------------------------------------------------------- clock, dates, prayers
+
+              private void updateTime() {
+                  Calendar now = Calendar.getInstance();
+                  int h = now.get(Calendar.HOUR_OF_DAY), m = now.get(Calendar.MINUTE);
+                  clock.setText((h % 12 == 0 ? 12 : h % 12) + ":" + (m < 10 ? "0" : "") + m);
+                  ampm.setText(h < 12 ? "ص" : "م");
+
+                  android.icu.util.IslamicCalendar hc = hijri(now.getTimeInMillis());
+                  int hDay = hc.get(android.icu.util.Calendar.DAY_OF_MONTH);
+                  int hMonth = hc.get(android.icu.util.Calendar.MONTH);
+                  int hYear = hc.get(android.icu.util.Calendar.YEAR);
+                  dayName.setText(DAYS[now.get(Calendar.DAY_OF_WEEK) - 1]);
+                  dateLine.setText(now.get(Calendar.DAY_OF_MONTH) + " " + G_MONTHS[now.get(Calendar.MONTH)] + " "
+                          + now.get(Calendar.YEAR) + "  ·  " + hDay + " " + H_MONTHS[hMonth] + " " + hYear + " هـ");
+
+                  double[] t = timesFor(now, hMonth == 8);
+                  double nowH = h + m / 60.0 + now.get(Calendar.SECOND) / 3600.0;
+                  int next = -1;
+                  for (int i = 0; i < 5; i++) if (t[i] > nowH) { next = i; break; }
+                  double nextAt;
+                  if (next >= 0) {
+                      nextAt = t[next];
+                  } else {
+                      Calendar tomorrow = (Calendar) now.clone();
+                      tomorrow.add(Calendar.DAY_OF_MONTH, 1);
+                      next = 0;
+                      nextAt = timesFor(tomorrow, hMonth == 8)[0] + 24;
+                  }
+                  for (int i = 0; i < 5; i++) {
+                      prayerViews[i].setText(PRAYERS[i] + " " + clockText(t[i]));
+                      boolean on = i == next && nextAt < 24;
+                      prayerViews[i].setTextColor(on ? GOLD : SOFT);
+                      prayerViews[i].setTypeface(Typeface.DEFAULT, on ? Typeface.BOLD : Typeface.NORMAL);
+                  }
+                  nextName.setText(PRAYERS[next]);
+                  nextTime.setText(clockText(nextAt) + (nextAt % 24 < 12 ? " ص" : " م"));
+                  int left = (int) Math.round((nextAt - nowH) * 60);
+                  nextLeft.setText("بعد " + duration(left));
+
+                  updateRamadan(now, hMonth, hDay);
+              }
+
+              private double[] timesFor(Calendar day, boolean ramadan) {
+                  double tz = TimeZone.getDefault().getOffset(day.getTimeInMillis()) / 3_600_000.0;
+                  return PrayerMath.times(day.get(Calendar.YEAR), day.get(Calendar.MONTH) + 1,
+                          day.get(Calendar.DAY_OF_MONTH), LATITUDE, LONGITUDE, tz, ramadan);
+              }
+
+              private void updateRamadan(Calendar now, int hMonth, int hDay) {
+                  if (hMonth == 8) {
+                      ramadanBig.setText("رمضان مبارك");
+                      ramadanSmall.setText("اليوم " + hDay + " من رمضان");
+                      return;
+                  }
+                  Calendar day = (Calendar) now.clone();
+                  for (int d = 1; d <= 400; d++) {
+                      day.add(Calendar.DAY_OF_MONTH, 1);
+                      android.icu.util.IslamicCalendar hc = hijri(day.getTimeInMillis());
+                      if (hc.get(android.icu.util.Calendar.MONTH) == 8 && hc.get(android.icu.util.Calendar.DAY_OF_MONTH) == 1) {
+                          ramadanBig.setText(days(d));
+                          ramadanSmall.setText("يبدأ " + DAYS[day.get(Calendar.DAY_OF_WEEK) - 1] + " "
+                                  + day.get(Calendar.DAY_OF_MONTH) + " " + G_MONTHS[day.get(Calendar.MONTH)] + " تقريبًا");
+                          return;
+                      }
+                  }
+              }
+
+              private static android.icu.util.IslamicCalendar hijri(long millis) {
+                  android.icu.util.IslamicCalendar hc = new android.icu.util.IslamicCalendar();
+                  hc.setCalculationType(android.icu.util.IslamicCalendar.CalculationType.ISLAMIC_UMALQURA);
+                  hc.setTimeInMillis(millis);
+                  return hc;
+              }
+
+              private static String clockText(double hours) {
+                  int total = (int) Math.round(hours * 60);
+                  total = ((total % 1440) + 1440) % 1440;
+                  int hh = total / 60, mm = total % 60;
+                  return (hh % 12 == 0 ? 12 : hh % 12) + ":" + (mm < 10 ? "0" : "") + mm;
+              }
+
+              private static String days(int d) {
+                  if (d == 1) return "يوم واحد";
+                  if (d == 2) return "يومان";
+                  if (d <= 10) return d + " أيام";
+                  return d + " يومًا";
+              }
+
+              private static String duration(int minutes) {
+                  if (minutes < 1) return "أقل من دقيقة";
+                  int h = minutes / 60, m = minutes % 60;
+                  String hs = h == 0 ? "" : h == 1 ? "ساعة" : h == 2 ? "ساعتين" : h <= 10 ? h + " ساعات" : h + " ساعة";
+                  String ms = m == 0 ? "" : m == 1 ? "دقيقة" : m == 2 ? "دقيقتين" : m <= 10 ? m + " دقائق" : m + " دقيقة";
+                  if (hs.isEmpty()) return ms;
+                  if (ms.isEmpty()) return hs;
+                  return hs + " و" + ms;
+              }
+
+              // ---------------------------------------------------------------- weather (Open-Meteo, no key)
+
+              private void fetchWeather() {
+                  String url = "https://api.open-meteo.com/v1/forecast?latitude=" + LATITUDE + "&longitude=" + LONGITUDE
+                          + "&current=temperature_2m,weather_code&daily=temperature_2m_max,temperature_2m_min&timezone=auto";
+                  new Thread(() -> {
+                      try {
+                          JSONObject j = new JSONObject(new String(get(url), "UTF-8"));
+                          JSONObject cur = j.getJSONObject("current");
+                          int temp = (int) Math.round(cur.getDouble("temperature_2m"));
+                          int code = cur.getInt("weather_code");
+                          JSONObject daily = j.getJSONObject("daily");
+                          int max = (int) Math.round(daily.getJSONArray("temperature_2m_max").getDouble(0));
+                          int min = (int) Math.round(daily.getJSONArray("temperature_2m_min").getDouble(0));
+                          ui.post(() -> {
+                              weatherTemp.setText(temp + "°");
+                              weatherDesc.setText(sky(code) + "  ·  العظمى " + max + "° والصغرى " + min + "°");
+                          });
+                      } catch (Exception e) {
+                          lastWeather = System.currentTimeMillis() - 25 * 60_000L; // retry in 5 minutes
+                      }
+                  }).start();
+              }
+
+              private static String sky(int code) {
+                  if (code == 0) return "صافٍ";
+                  if (code <= 2) return "غائم جزئيًا";
+                  if (code == 3) return "غائم";
+                  if (code == 45 || code == 48) return "ضباب";
+                  if (code >= 51 && code <= 57) return "رذاذ";
+                  if (code >= 61 && code <= 67) return "مطر";
+                  if (code >= 71 && code <= 77) return "ثلج";
+                  if (code >= 80 && code <= 82) return "زخات مطر";
+                  if (code >= 95) return "عاصفة رعدية";
+                  return "";
+              }
+
+              // ---------------------------------------------------------------- SPA news (RSS)
+
+              private void fetchNews() {
+                  new Thread(() -> {
+                      for (String url : SPA) {
+                          try {
+                              List<String[]> items = parseRss(get(url));
+                              if (items.isEmpty()) continue;
+                              ui.post(() -> {
+                                  news.clear();
+                                  news.addAll(items);
+                                  newsIndex = 0;
+                                  showNews();
+                              });
+                              return;
+                          } catch (Exception ignored) {
+                          }
+                      }
+                      lastNews = System.currentTimeMillis() - 10 * 60_000L; // retry in 5 minutes
+                  }).start();
+              }
+
+              private static List<String[]> parseRss(byte[] xml) throws Exception {
+                  List<String[]> out = new ArrayList<>();
+                  XmlPullParser p = Xml.newPullParser();
+                  p.setInput(new ByteArrayInputStream(xml), null);
+                  String title = null, date = null, tag = null;
+                  boolean inItem = false;
+                  for (int ev = p.getEventType(); ev != XmlPullParser.END_DOCUMENT && out.size() < 3; ev = p.next()) {
+                      if (ev == XmlPullParser.START_TAG) {
+                          tag = p.getName();
+                          if ("item".equals(tag)) { inItem = true; title = null; date = null; }
+                      } else if (ev == XmlPullParser.TEXT && inItem && tag != null) {
+                          String t = p.getText().trim();
+                          if (t.isEmpty()) continue;
+                          if ("title".equals(tag)) title = t;
+                          else if ("pubDate".equals(tag)) date = t;
+                      } else if (ev == XmlPullParser.END_TAG) {
+                          if ("item".equals(p.getName()) && title != null) {
+                              out.add(new String[]{title, date});
+                              inItem = false;
+                          }
+                          tag = null;
+                      }
+                  }
+                  return out;
+              }
+
+              private void showNews() {
+                  if (news.isEmpty()) return;
+                  String[] item = news.get(newsIndex % news.size());
+                  newsTitle.setText(item[0]);
+                  newsTime.setText(when(item[1]));
+                  newsBox.setVisibility(View.VISIBLE);
+              }
+
+              private static String when(String rfc822) {
+                  if (rfc822 == null) return "";
+                  try {
+                      Date d = new SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss Z", Locale.US).parse(rfc822);
+                      if (d == null) return "";
+                      long mins = (System.currentTimeMillis() - d.getTime()) / 60_000L;
+                      if (mins < 1) return "الآن";
+                      if (mins < 60) return "قبل " + duration((int) mins);
+                      if (mins < 24 * 60) return "قبل " + duration((int) (mins / 60) * 60);
+                      Calendar c = Calendar.getInstance();
+                      c.setTime(d);
+                      return c.get(Calendar.DAY_OF_MONTH) + " " + G_MONTHS[c.get(Calendar.MONTH)];
+                  } catch (Exception e) {
+                      return "";
+                  }
+              }
+
+              // ---------------------------------------------------------------- Bing picture of the day
+
+              private File bgFile() {
+                  return new File(ctx.getFilesDir(), "bing.jpg");
+              }
+
+              private void loadCachedBackground() {
+                  File f = bgFile();
+                  if (f.isFile()) {
+                      Bitmap b = BitmapFactory.decodeFile(f.getAbsolutePath());
+                      if (b != null) bg.setImageBitmap(b);
+                  }
+                  caption.setText(prefs.getString("caption", ""));
+              }
+
+              private void fetchBing() {
+                  String today = new SimpleDateFormat("yyyyMMdd", Locale.US).format(new Date());
+                  if (today.equals(prefs.getString("day", "")) && bgFile().isFile()) return;
+                  new Thread(() -> {
+                      try {
+                          JSONObject img = new JSONObject(new String(get(BING), "UTF-8"))
+                                  .getJSONArray("images").getJSONObject(0);
+                          String base = img.optString("urlbase", "");
+                          String url = base.isEmpty() ? img.getString("url") : base + "_1920x1080.jpg";
+                          if (url.startsWith("/")) url = "https://www.bing.com" + url;
+                          byte[] jpg = get(url);
+                          Bitmap b = BitmapFactory.decodeByteArray(jpg, 0, jpg.length);
+                          if (b == null) throw new IllegalStateException("not an image");
+                          try (FileOutputStream out = new FileOutputStream(bgFile())) {
+                              out.write(jpg);
+                          }
+                          String cap = img.optString("copyright", "");
+                          prefs.edit().putString("day", today).putString("caption", cap).apply();
+                          ui.post(() -> {
+                              bg.setImageBitmap(b);
+                              caption.setText(cap);
+                          });
+                      } catch (Exception e) {
+                          lastBing = System.currentTimeMillis() - 50 * 60_000L; // retry in 10 minutes
+                      }
+                  }).start();
+              }
+
+              // ---------------------------------------------------------------- helpers
+
+              private static byte[] get(String url) throws Exception {
+                  HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+                  c.setConnectTimeout(10_000);
+                  c.setReadTimeout(15_000);
+                  c.setInstanceFollowRedirects(true);
+                  c.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android TV) SaudiDream/1.0");
+                  try (InputStream in = c.getInputStream()) {
+                      ByteArrayOutputStream out = new ByteArrayOutputStream();
+                      byte[] buf = new byte[16384];
+                      for (int n; (n = in.read(buf)) > 0; ) out.write(buf, 0, n);
+                      return out.toByteArray();
+                  } finally {
+                      c.disconnect();
+                  }
+              }
+
+              private int px(float design) {
+                  return Math.round(design * s);
+              }
+
+              private static FrameLayout.LayoutParams match() {
+                  return new FrameLayout.LayoutParams(-1, -1);
+              }
+
+              private LinearLayout column() {
+                  LinearLayout l = new LinearLayout(ctx);
+                  l.setOrientation(LinearLayout.VERTICAL);
+                  return l;
+              }
+
+              private View divider() {
+                  View v = new View(ctx);
+                  v.setBackgroundColor(0x59FFFFFF);
+                  return v;
+              }
+
+              private TextView label(String t) {
+                  TextView v = text(24, DIM, false);
+                  v.setText(t);
+                  return v;
+              }
+
+              private TextView text(float size, int color, boolean bold) {
+                  TextView v = new TextView(ctx);
+                  v.setTextSize(TypedValue.COMPLEX_UNIT_PX, size * s);
+                  v.setTextColor(color);
+                  if (bold) v.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+                  v.setShadowLayer(18 * s, 0, 2 * s, 0x73000000);
+                  return v;
+              }
+          }
+          SAUDI_EOF
+          mkdir -p "addons/saudi-dream/app/src/main/res/xml"
+          cat > "addons/saudi-dream/app/src/main/res/xml/dream.xml" <<'SAUDI_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <dream xmlns:android="http://schemas.android.com/apk/res/android" />
+          SAUDI_EOF
+          mkdir -p "addons/saudi-dream"
+          cat > "addons/saudi-dream/build.gradle" <<'SAUDI_EOF'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+          }
+          SAUDI_EOF
+          mkdir -p "addons/saudi-dream"
+          cat > "addons/saudi-dream/gradle.properties" <<'SAUDI_EOF'
+          org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          SAUDI_EOF
+          mkdir -p "addons/saudi-dream"
+          cat > "addons/saudi-dream/gradlew" <<'SAUDI_EOF'
+          #!/bin/sh
+          # Reuse the repository's pinned Gradle distribution, but build this independent project.
+          addon_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 1
+          exec sh "$addon_dir/../../launcher/gradlew" -p "$addon_dir" "$@"
+          SAUDI_EOF
+          mkdir -p "addons/saudi-dream"
+          cat > "addons/saudi-dream/settings.gradle" <<'SAUDI_EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "saudidream"
+          include ':app'
+          SAUDI_EOF
+          chmod +x addons/saudi-dream/gradlew
+      - name: Build
+        working-directory: addons/saudi-dream
+        run: ./gradlew --no-daemon assembleRelease
+      - uses: actions/upload-artifact@v4
+        with:
+          name: saudi-screensaver
+          path: addons/saudi-dream/app/build/outputs/apk/release/app-release.apk
